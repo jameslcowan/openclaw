@@ -139,6 +139,38 @@ export function createTelegramDraftStream(params: {
     renderedParseMode: "HTML" | undefined;
     sendGeneration: number;
   };
+  const sendRenderedMessageWithThreadFallback = async (sendArgs: {
+    renderedText: string;
+    renderedParseMode: "HTML" | undefined;
+    fallbackWarnMessage: string;
+  }) => {
+    const sendParams = sendArgs.renderedParseMode
+      ? {
+          ...replyParams,
+          parse_mode: sendArgs.renderedParseMode,
+        }
+      : replyParams;
+    try {
+      return await params.api.sendMessage(chatId, sendArgs.renderedText, sendParams);
+    } catch (err) {
+      const hasThreadParam =
+        "message_thread_id" in (sendParams ?? {}) &&
+        typeof (sendParams as { message_thread_id?: unknown }).message_thread_id === "number";
+      if (!hasThreadParam || !THREAD_NOT_FOUND_RE.test(String(err))) {
+        throw err;
+      }
+      const threadlessParams = {
+        ...(sendParams as Record<string, unknown>),
+      };
+      delete threadlessParams.message_thread_id;
+      params.warn?.(sendArgs.fallbackWarnMessage);
+      return await params.api.sendMessage(
+        chatId,
+        sendArgs.renderedText,
+        Object.keys(threadlessParams).length > 0 ? threadlessParams : undefined,
+      );
+    }
+  };
   const sendMessageTransportPreview = async ({
     renderedText,
     renderedParseMode,
@@ -154,35 +186,12 @@ export function createTelegramDraftStream(params: {
       }
       return true;
     }
-    const sendParams = renderedParseMode
-      ? {
-          ...replyParams,
-          parse_mode: renderedParseMode,
-        }
-      : replyParams;
-    let sent;
-    try {
-      sent = await params.api.sendMessage(chatId, renderedText, sendParams);
-    } catch (err) {
-      const hasThreadParam =
-        "message_thread_id" in (sendParams ?? {}) &&
-        typeof (sendParams as { message_thread_id?: unknown }).message_thread_id === "number";
-      if (!hasThreadParam || !THREAD_NOT_FOUND_RE.test(String(err))) {
-        throw err;
-      }
-      const threadlessParams = {
-        ...(sendParams as Record<string, unknown>),
-      };
-      delete threadlessParams.message_thread_id;
-      params.warn?.(
+    const sent = await sendRenderedMessageWithThreadFallback({
+      renderedText,
+      renderedParseMode,
+      fallbackWarnMessage:
         "telegram stream preview send failed with message_thread_id, retrying without thread",
-      );
-      sent = await params.api.sendMessage(
-        chatId,
-        renderedText,
-        Object.keys(threadlessParams).length > 0 ? threadlessParams : undefined,
-      );
-    }
+    });
     const sentMessageId = sent?.message_id;
     if (typeof sentMessageId !== "number" || !Number.isFinite(sentMessageId)) {
       streamState.stopped = true;
@@ -352,16 +361,20 @@ export function createTelegramDraftStream(params: {
     if (previewTransport === "message" && typeof streamMessageId === "number") {
       return streamMessageId;
     }
-    // For draft transport, we need to send the text as a real message.
-    const textToMaterialize = lastDeliveredText ?? lastSentText;
-    if (!textToMaterialize) {
+    // For draft transport, use the rendered snapshot first so parse_mode stays
+    // aligned with the text being materialized.
+    const renderedText = lastSentText || lastDeliveredText;
+    if (!renderedText) {
       return undefined;
     }
+    const renderedParseMode = lastSentText ? lastSentParseMode : undefined;
     try {
-      const sendParams = lastSentParseMode
-        ? { ...replyParams, parse_mode: lastSentParseMode }
-        : replyParams;
-      const sent = await params.api.sendMessage(chatId, textToMaterialize, sendParams);
+      const sent = await sendRenderedMessageWithThreadFallback({
+        renderedText,
+        renderedParseMode,
+        fallbackWarnMessage:
+          "telegram stream preview materialize send failed with message_thread_id, retrying without thread",
+      });
       const sentId = sent?.message_id;
       if (typeof sentId === "number" && Number.isFinite(sentId)) {
         streamMessageId = Math.trunc(sentId);
