@@ -484,7 +484,20 @@ function normalizeProviderModels(
  */
 export function normalizeGoogleBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, "");
-  if (trimmed.includes("generativelanguage.googleapis.com") && !/\/v\d/.test(trimmed)) {
+  // Use a reliable hostname check to avoid false-positives on look-alike domains
+  // (e.g. generativelanguage.googleapis.com.evil.com) or query strings that
+  // happen to contain the googleapis domain as a substring.
+  let hostname: string;
+  try {
+    hostname = new URL(trimmed).hostname;
+  } catch {
+    return baseUrl;
+  }
+  if (hostname !== "generativelanguage.googleapis.com") {
+    // Non-googleapis URLs (custom proxies) are left completely unchanged.
+    return baseUrl;
+  }
+  if (!/\/v\d/.test(trimmed)) {
     return `${trimmed}/v1beta`;
   }
   return trimmed;
